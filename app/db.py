@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS를 반복 실행했는데(매 요청마다 불필요�
 """
 
 import json
+import math
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -39,10 +40,14 @@ def init_schema() -> None:
                 chapter_id TEXT NOT NULL,
                 chapter_index INTEGER NOT NULL,
                 page_index INTEGER NOT NULL DEFAULT 0,
+                page_offset REAL NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(progress)")}
+        if "page_offset" not in columns:
+            conn.execute("ALTER TABLE progress ADD COLUMN page_offset REAL NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS app_settings (
@@ -91,30 +96,54 @@ def db_connection():
 # ---------------------------------------------------------------------------
 
 
+def normalize_page_offset(value) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        offset = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return offset if math.isfinite(offset) and 0 <= offset <= 1 else 0.0
+
+
 def get_progress(series_id: str) -> dict | None:
     with db_connection() as conn:
         row = conn.execute(
-            "SELECT chapter_id, chapter_index, page_index FROM progress WHERE series_id = ?",
+            "SELECT chapter_id, chapter_index, page_index, page_offset FROM progress WHERE series_id = ?",
             (series_id,),
         ).fetchone()
     if not row:
         return None
-    return {"chapter_id": row[0], "chapter_index": row[1], "page_index": row[2]}
+    result = {"chapter_id": row[0], "chapter_index": row[1], "page_index": row[2]}
+    offset = normalize_page_offset(row[3])
+    if offset > 0:
+        result["page_offset"] = offset
+    return result
 
 
-def set_progress(series_id: str, chapter_id: str, chapter_index: int, page_index: int) -> None:
+def get_progress_metadata(series_id: str) -> dict | None:
+    with db_connection() as conn:
+        row = conn.execute(
+            "SELECT updated_at, page_offset FROM progress WHERE series_id = ?", (series_id,)
+        ).fetchone()
+    return {"updated_at": row[0], "page_offset": normalize_page_offset(row[1])} if row else None
+
+
+def set_progress(series_id: str, chapter_id: str, chapter_index: int, page_index: int, *, page_offset: float = 0.0) -> None:
+    offset = normalize_page_offset(page_offset) if page_index < PAGE_FINISHED_SENTINEL else 0.0
     with db_connection() as conn:
         conn.execute(
             """
-            INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, page_offset, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(series_id) DO UPDATE SET
                 chapter_id = excluded.chapter_id,
                 chapter_index = excluded.chapter_index,
                 page_index = excluded.page_index,
+                page_offset = excluded.page_offset,
                 updated_at = excluded.updated_at
             """,
-            (series_id, chapter_id, chapter_index, page_index, _utc_now_iso()),
+            (series_id, chapter_id, chapter_index, page_index, offset, _utc_now_iso()),
         )
         conn.commit()
 
@@ -273,7 +302,7 @@ def set_cached_overlap(next_chapter_id: str, prev_chapter_id: str, skip_pages: i
 def export_backup_data() -> dict:
     with db_connection() as conn:
         progress_rows = conn.execute(
-            "SELECT series_id, chapter_id, chapter_index, page_index, updated_at FROM progress"
+            "SELECT series_id, chapter_id, chapter_index, page_index, updated_at, page_offset FROM progress"
         ).fetchall()
         settings_rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
         read_rows = conn.execute("SELECT series_id, chapter_id FROM read_chapters").fetchall()
@@ -285,6 +314,7 @@ def export_backup_data() -> dict:
                 "chapter_index": row[2],
                 "page_index": row[3],
                 "updated_at": row[4],
+                "page_offset": normalize_page_offset(row[5]),
             }
             for row in progress_rows
         ],
@@ -312,8 +342,8 @@ def import_backup_data(progress_rows: list, settings_rows: list, read_chapter_ro
                 continue
             conn.execute(
                 """
-                INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, updated_at, page_offset)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     series_id,
@@ -321,6 +351,7 @@ def import_backup_data(progress_rows: list, settings_rows: list, read_chapter_ro
                     int(row.get("chapter_index", 0)),
                     int(row.get("page_index", 0)),
                     row.get("updated_at") or _utc_now_iso(),
+                    normalize_page_offset(row.get("page_offset", 0)),
                 ),
             )
             progress_count += 1

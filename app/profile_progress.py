@@ -31,11 +31,15 @@ def init_schema() -> None:
                 chapter_id TEXT NOT NULL,
                 chapter_index INTEGER NOT NULL,
                 page_index INTEGER NOT NULL DEFAULT 0,
+                page_offset REAL NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (profile_id, series_id)
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(profile_progress)")}
+        if "page_offset" not in columns:
+            conn.execute("ALTER TABLE profile_progress ADD COLUMN page_offset REAL NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS profile_read_chapters (
@@ -54,28 +58,34 @@ def init_schema() -> None:
 def get_progress(profile_id: str, series_id: str) -> dict | None:
     with db.db_connection() as conn:
         row = conn.execute(
-            "SELECT chapter_id, chapter_index, page_index FROM profile_progress "
+            "SELECT chapter_id, chapter_index, page_index, page_offset FROM profile_progress "
             "WHERE profile_id = ? AND series_id = ?",
             (profile_id, series_id),
         ).fetchone()
     if not row:
         return None
-    return {"chapter_id": row[0], "chapter_index": row[1], "page_index": row[2]}
+    result = {"chapter_id": row[0], "chapter_index": row[1], "page_index": row[2]}
+    offset = db.normalize_page_offset(row[3])
+    if offset > 0:
+        result["page_offset"] = offset
+    return result
 
 
-def set_progress(profile_id: str, series_id: str, chapter_id: str, chapter_index: int, page_index: int) -> None:
+def set_progress(profile_id: str, series_id: str, chapter_id: str, chapter_index: int, page_index: int, *, page_offset: float = 0.0) -> None:
+    offset = db.normalize_page_offset(page_offset) if page_index < PAGE_FINISHED_SENTINEL else 0.0
     with db.db_connection() as conn:
         conn.execute(
             """
-            INSERT INTO profile_progress (profile_id, series_id, chapter_id, chapter_index, page_index, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO profile_progress (profile_id, series_id, chapter_id, chapter_index, page_index, page_offset, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (profile_id, series_id) DO UPDATE SET
                 chapter_id = excluded.chapter_id,
                 chapter_index = excluded.chapter_index,
                 page_index = excluded.page_index,
+                page_offset = excluded.page_offset,
                 updated_at = excluded.updated_at
             """,
-            (profile_id, series_id, chapter_id, chapter_index, page_index, datetime.utcnow().isoformat()),
+            (profile_id, series_id, chapter_id, chapter_index, page_index, offset, datetime.utcnow().isoformat()),
         )
         conn.commit()
 
@@ -142,7 +152,7 @@ def export_all() -> dict:
     init_schema()
     with db.db_connection() as conn:
         progress_rows = conn.execute(
-            "SELECT profile_id, series_id, chapter_id, chapter_index, page_index, updated_at FROM profile_progress"
+            "SELECT profile_id, series_id, chapter_id, chapter_index, page_index, updated_at, page_offset FROM profile_progress"
         ).fetchall()
         read_rows = conn.execute(
             "SELECT profile_id, series_id, chapter_id FROM profile_read_chapters"
@@ -152,6 +162,7 @@ def export_all() -> dict:
             {
                 "profile_id": r[0], "series_id": r[1], "chapter_id": r[2],
                 "chapter_index": r[3], "page_index": r[4], "updated_at": r[5],
+                "page_offset": db.normalize_page_offset(r[6]),
             }
             for r in progress_rows
         ],
@@ -176,12 +187,13 @@ def import_all(progress_rows: list, read_chapter_rows: list) -> int:
             conn.execute(
                 """
                 INSERT INTO profile_progress
-                    (profile_id, series_id, chapter_id, chapter_index, page_index, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (profile_id, series_id, chapter_id, chapter_index, page_index, updated_at, page_offset)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["profile_id"], row["series_id"], row["chapter_id"],
                     row["chapter_index"], row.get("page_index", 0), row["updated_at"],
+                    db.normalize_page_offset(row.get("page_offset", 0)),
                 ),
             )
             count += 1

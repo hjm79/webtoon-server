@@ -611,7 +611,9 @@ async function goContinue(seriesId) {
     const res = await fetch(`/api/series/${encodeURIComponent(seriesId)}/continue`);
     if (!res.ok) throw new Error("continue lookup failed");
     const data = await res.json();
-    location.href = withProfilePrefix(`/reader.html?series=${encodeURIComponent(seriesId)}&chapter=${encodeURIComponent(data.chapter_id)}&page=${data.page_index}`);
+    const offset = Number.isFinite(data.page_offset) && data.page_offset > 0 && data.page_offset <= 1
+      ? `&page_offset=${data.page_offset}` : "";
+    location.href = withProfilePrefix(`/reader.html?series=${encodeURIComponent(seriesId)}&chapter=${encodeURIComponent(data.chapter_id)}&page=${data.page_index}${offset}`);
   } catch (e) {
     // 이동 실패 시 아무것도 하지 않음 (콘솔에만 남김)
     console.error(e);

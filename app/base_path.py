@@ -52,7 +52,7 @@ async def html_response(path: str | Path) -> HTMLResponse:
 
 class PublicStaticFiles(StaticFiles):
     def is_not_modified(self, response_headers, request_headers):
-        if response_headers.get("content-type", "").startswith(("text/html", "application/json")):
+        if response_headers.get("content-type", "").startswith(("text/html", "application/json", "text/javascript", "application/javascript", "text/css")):
             return False
         return super().is_not_modified(response_headers, request_headers)
 
@@ -62,6 +62,8 @@ class PublicStaticFiles(StaticFiles):
             return response
         if response.media_type == "text/html":
             return await html_response(response.path)
+        if response.media_type in ("text/javascript", "application/javascript", "text/css"):
+            response.headers["Cache-Control"] = "no-store"
         if path == "manifest.json":
             manifest = json.loads(await anyio.Path(response.path).read_text(encoding="utf-8"))
             profile = scope.get("state", {}).get("profile")

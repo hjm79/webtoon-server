@@ -28,7 +28,7 @@ def test_prefixed_html_assets_and_manifest_do_not_escape_to_manager_root(client,
         assert '__WEBTOON_BASE_PATH__' not in response.text
         assert 'content="/viewer"' in response.text
         assert 'src="/viewer/base-path.js"' in response.text
-        assert 'href="/viewer/style.css"' in response.text
+        assert re.search(r'href="/viewer/style\.css(?:\?[^"\s]+)?"', response.text)
         assert response.headers["cache-control"] == "no-store"
         for url in re.findall(r'(?:href|src)="(/[^"?]+)', response.text):
             assert url.startswith("/viewer/"), url

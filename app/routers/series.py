@@ -9,10 +9,11 @@ profile이 None(관리자)일 때는 access_control이 그대로 db.py에 위임
 """
 
 import asyncio
+import math
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from .. import access_control, catalog, covers, db, profiles as profiles_module, scan, series_lists, services
 
@@ -177,8 +178,12 @@ async def continue_reading(series_id: str, request: Request):
             if prog["page_index"] >= page_count and idx + 1 < len(series["chapters"]):
                 next_chapter = series["chapters"][idx + 1]
                 return {"chapter_id": next_chapter["id"], "page_index": 0}
-            clamped_page = min(prog["page_index"], max(page_count - 1, 0))
-            return {"chapter_id": prog["chapter_id"], "page_index": clamped_page}
+            clamped_page = min(max(prog["page_index"], 0), max(page_count - 1, 0))
+            result = {"chapter_id": prog["chapter_id"], "page_index": clamped_page}
+            offset = db.normalize_page_offset(prog.get("page_offset", 0))
+            if offset > 0 and clamped_page == prog["page_index"]:
+                result["page_offset"] = offset
+            return result
 
     first_chapter = series["chapters"][0]
     return {"chapter_id": first_chapter["id"], "page_index": 0}
@@ -187,6 +192,14 @@ async def continue_reading(series_id: str, request: Request):
 class ProgressIn(BaseModel):
     chapter_id: str
     page_index: int = 0
+    page_offset: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False, strict=True)
+
+    @field_validator("page_offset", mode="before")
+    @classmethod
+    def finite_offset(cls, value):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise HTTPException(422, "page_offset must be a finite number between 0 and 1")
+        return value
 
 
 @router.put("/api/series/{series_id}/progress")
@@ -217,7 +230,9 @@ async def save_progress(series_id: str, body: ProgressIn, request: Request):
             access_control.set_progress(profile, series_id, body.chapter_id, idx, db.PAGE_FINISHED_SENTINEL)
             return {"ok": True}
 
-    access_control.set_progress(profile, series_id, body.chapter_id, idx, max(body.page_index, 0))
+    access_control.set_progress(
+        profile, series_id, body.chapter_id, idx, max(body.page_index, 0), page_offset=body.page_offset
+    )
     return {"ok": True}
 
 

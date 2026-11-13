@@ -14,7 +14,7 @@ import weakref
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
-from .. import access_control, catalog, db, overlap, scan, services, warmup
+from .. import access_control, catalog, db, overlap, page_geometry, scan, services, warmup
 
 log = logging.getLogger("webtoon-server")
 router = APIRouter()
@@ -47,14 +47,17 @@ def _resolve_and_authorize(chapter_id: str, profile: dict | None):
 
 
 @router.get("/api/chapters/{chapter_id}/pages")
-async def chapter_pages(chapter_id: str, request: Request):
+async def chapter_pages(chapter_id: str, request: Request, dimensions: bool = False):
     profile = access_control.get_profile(request)
     zip_path, series, index = _resolve_and_authorize(chapter_id, profile)
     platform = series["platform"] if series else ""
     names = await services.run_platform_io(platform, scan.list_zip_image_names, zip_path)
     # 지금 회차를 여는 김에 다음 회차 zip도 서버가 먼저 읽어 둔다(응답을 기다리게 하지 않는 백그라운드 작업)
     warmup.schedule_next_chapter_warmup(series, index)
-    return {"page_count": len(names)}
+    result = {"page_count": len(names)}
+    if dimensions:
+        result["page_sizes"] = await services.run_platform_io(platform, page_geometry.chapter_page_sizes, zip_path)
+    return result
 
 
 @router.get("/api/chapters/{chapter_id}/overlap")

@@ -37,7 +37,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from . import base_path, db, embedding, services
-from .routers import backup, chapters, integration, library, series, series_lists, settings
+from .routers import backup, chapters, integration, library, series, series_lists, settings, supporter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("webtoon-server")
@@ -138,6 +138,8 @@ async def profile_and_admin_gate(request, call_next):
             return JSONResponse({"detail": "profile link not found"}, status_code=404)
         request.state.profile = profile
         rest = "/" + parts[3] if len(parts) > 3 else "/"
+        if rest in ("/api/supporter/shelf", "/api/supporter/health"):
+            return JSONResponse({"detail": "Not Found"}, status_code=404, headers={"Cache-Control": "no-store"})
 
         # 기기 승인 게이트 - 최대 2대까지는 자동 등록, 3번째부터는 관리자 승인이
         # 필요하다. 상태 조회/신청 API 자체는 항상 통과시켜야(안 그러면 대기 화면
@@ -195,6 +197,9 @@ async def profile_and_admin_gate(request, call_next):
     device_id = base_path.device_cookie(request, DEVICE_COOKIE_NAME)
     if auth.is_device_remembered(device_id):
         auth.touch_device(device_id)
+        return await call_next(request)
+
+    if path in ("/api/supporter/shelf", "/api/supporter/health"):
         return await call_next(request)
 
     if any(path == allowed or path.startswith(allowed) for allowed in _ADMIN_GATE_ALLOWLIST):
@@ -295,6 +300,7 @@ app.include_router(series.router)
 app.include_router(series_lists.router)
 app.include_router(chapters.router)
 app.include_router(settings.router)
+app.include_router(supporter.router)
 app.include_router(backup.router)
 
 if PROFILES_ENABLED:

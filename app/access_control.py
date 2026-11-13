@@ -77,11 +77,11 @@ def get_progress(profile: dict | None, series_id: str) -> dict | None:
     return profile_progress.get_progress(profile["id"], series_id)
 
 
-def set_progress(profile: dict | None, series_id: str, chapter_id: str, chapter_index: int, page_index: int) -> None:
+def set_progress(profile: dict | None, series_id: str, chapter_id: str, chapter_index: int, page_index: int, *, page_offset: float = 0.0) -> None:
     if profile is None:
-        db.set_progress(series_id, chapter_id, chapter_index, page_index)
+        db.set_progress(series_id, chapter_id, chapter_index, page_index, page_offset=page_offset)
     else:
-        profile_progress.set_progress(profile["id"], series_id, chapter_id, chapter_index, page_index)
+        profile_progress.set_progress(profile["id"], series_id, chapter_id, chapter_index, page_index, page_offset=page_offset)
 
 
 def delete_progress(profile: dict | None, series_id: str) -> None:

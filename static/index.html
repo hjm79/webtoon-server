@@ -3,10 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="webtoon-base-path" content="__WEBTOON_BASE_PATH__">
+<script src="__WEBTOON_BASE_PATH__/base-path.js"></script>
 <title>내 웹툰</title>
-<link rel="icon" href="/favicon.ico" sizes="any">
-<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="__WEBTOON_BASE_PATH__/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="__WEBTOON_BASE_PATH__/icons/apple-touch-icon.png">
+<link rel="manifest" href="__WEBTOON_BASE_PATH__/manifest.json">
 <meta name="theme-color" content="#14161a">
 <!-- iOS는 manifest.json의 "display": "standalone"만으로는 홈 화면 추가 시 완전한
      독립 실행 취급을 안 해주는 경우가 있어서(구형 iOS일수록 더 그렇다), 애플 전용
@@ -15,7 +17,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="웹툰">
-<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="__WEBTOON_BASE_PATH__/style.css">
 </head>
 <body>
 <div id="openLoadingOverlay" class="open-loading-overlay" style="display:none">
@@ -92,7 +94,7 @@
       <div class="settings-hint">읽음 진행률, 검색/정렬/필터 설정, 제외된 폴더 목록, 공유 프로필(허용
       시리즈·접속 시간대·요청 내역 포함) 전부를 포함합니다.</div>
       <div class="read-action-picker-buttons">
-        <a id="backupBtn" href="/api/backup" class="mark-all-btn" download>백업 다운로드</a>
+        <a id="backupBtn" href="__WEBTOON_BASE_PATH__/api/backup" class="mark-all-btn" download>백업 다운로드</a>
         <button id="restoreBtn" class="mark-all-btn ghost">복원</button>
       </div>
       <input id="restoreFileInput" type="file" accept="application/json" style="display:none">
@@ -205,27 +207,15 @@
 // 안의 수십 개 fetch("/api/...") 호출을 하나하나 고칠 필요 없이 여기 한 곳에서 처리된다.
 // (단, <img src="cover_url">처럼 fetch를 안 거치는 링크는 서버가 애초에 토큰이 붙은
 // 경로로 내려주므로 - series.py의 profile_path_prefix 참고 - 여기서 손댈 필요 없음.)
-const PROFILE_TOKEN = (() => {
-  const match = location.pathname.match(/^\/p\/([^/]+)/);
-  return match ? match[1] : null;
-})();
+const PROFILE_TOKEN = WebtoonPaths.profileToken;
 const IS_PROFILE_VIEW = PROFILE_TOKEN !== null;
+window.fetch = WebtoonPaths.fetch;
 
-if (IS_PROFILE_VIEW) {
-  const _originalFetch = window.fetch.bind(window);
-  window.fetch = (url, options) => {
-    if (typeof url === "string" && url.startsWith("/api/")) {
-      url = `/p/${PROFILE_TOKEN}${url}`;
-    }
-    return _originalFetch(url, options);
-  };
-}
-
-// 프로필 화면(공유 링크로 들어온 경우) 안에서 다른 화면으로 이동할 때도 이 토큰 경로를
-// 유지해야 한다 - 예: 리더로 넘어갈 때 "/reader.html..."이 아니라 "/p/<토큰>/reader.html..."로.
 function withProfilePrefix(path) {
-  return IS_PROFILE_VIEW ? `/p/${PROFILE_TOKEN}${path}` : path;
+  return WebtoonPaths.path(path);
 }
+document.querySelector('link[rel="manifest"]').href = withProfilePrefix("/manifest.json");
+document.getElementById("backupBtn").href = withProfilePrefix("/api/backup");
 
 const LS_QUERY = `webtoon:index:query:${PROFILE_TOKEN || "admin"}`; // 검색어는 관리자/프로필별로 완전히 분리 저장
 const FILTER_KEY = "status_filter"; // 서버(app_settings)에 저장 -> 모든 기기에서 동일하게 적용
@@ -1863,7 +1853,7 @@ async function openProfileEditor(profileId) {
 
   document.getElementById("profileEditTitle").textContent = `"${profile.name}" 프로필 편집`;
   document.getElementById("profileNameInput").value = profile.name;
-  document.getElementById("profileUrlDisplay").textContent = `${location.origin}/p/${profile.token}`;
+  document.getElementById("profileUrlDisplay").textContent = `${location.origin}${WebtoonPaths.appPath(`/p/${profile.token}`)}`;
 
   renderProfileBrowseFilters(browseFilters);
   renderProfileTimeWindows(timeWindows);
@@ -2123,7 +2113,7 @@ async function reissueProfileToken() {
   if (!confirm("URL을 재발급하면 기존 링크는 즉시 무효화됩니다. 계속하시겠습니까?")) return;
   const res = await fetch(`/api/admin/profiles/${editingProfileId}/reissue-token`, { method: "POST" });
   const { token } = await res.json();
-  document.getElementById("profileUrlDisplay").textContent = `${location.origin}/p/${token}`;
+  document.getElementById("profileUrlDisplay").textContent = `${location.origin}${WebtoonPaths.appPath(`/p/${token}`)}`;
 }
 
 function copyProfileUrl() {

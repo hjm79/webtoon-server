@@ -34,10 +34,9 @@ import re
 import secrets
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, RedirectResponse
 
-from . import db, embedding, services
+from . import base_path, db, embedding, services
 from .routers import backup, chapters, integration, library, series, series_lists, settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -100,6 +99,7 @@ _ADMIN_GATE_ALLOWLIST = (
     "/manifest.json",
     "/icons/",
     "/style.css",
+    "/base-path.js",
     "/api/lookup/latest",
     "/api/lookup/read-state",
     "/api/integration/rescan",  # 토큰(INTEGRATION_TOKEN)으로 따로 인증한다 — 라우터에서 확인(routers/integration.py)
@@ -142,7 +142,7 @@ async def profile_and_admin_gate(request, call_next):
         # 기기 승인 게이트 - 최대 2대까지는 자동 등록, 3번째부터는 관리자 승인이
         # 필요하다. 상태 조회/신청 API 자체는 항상 통과시켜야(안 그러면 대기 화면
         # 자신이 자기 상태를 확인할 방법이 없어짐) 예외로 둔다.
-        device_id = request.cookies.get(profile_devices.PROFILE_DEVICE_COOKIE_NAME)
+        device_id = base_path.device_cookie(request, profile_devices.PROFILE_DEVICE_COOKIE_NAME)
         is_new_device_cookie = device_id is None
         if is_new_device_cookie:
             device_id = secrets.token_urlsafe(24)
@@ -164,7 +164,7 @@ async def profile_and_admin_gate(request, call_next):
                     {"detail": "device_not_approved", "status": device_status}, status_code=403
                 )
             else:
-                response = FileResponse(os.path.join(STATIC_DIR, "device-approval.html"))
+                response = await base_path.html_response(os.path.join(STATIC_DIR, "device-approval.html"))
         else:
             request.scope["path"] = rest
             response = await call_next(request)
@@ -187,11 +187,12 @@ async def profile_and_admin_gate(request, call_next):
                 max_age=profile_devices.PROFILE_DEVICE_COOKIE_MAX_AGE,
                 httponly=True,
                 samesite="lax",
+                path=base_path.cookie_path(),
             )
         return response
 
     request.state.profile = None
-    device_id = request.cookies.get(DEVICE_COOKIE_NAME)
+    device_id = base_path.device_cookie(request, DEVICE_COOKIE_NAME)
     if auth.is_device_remembered(device_id):
         auth.touch_device(device_id)
         return await call_next(request)
@@ -201,7 +202,7 @@ async def profile_and_admin_gate(request, call_next):
 
     if path.startswith("/api/"):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    return RedirectResponse("/login.html")
+    return RedirectResponse(base_path.public_path("/login.html"))
 
 
 @app.middleware("http")
@@ -212,6 +213,20 @@ async def reader_frame_policy(request, call_next):
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["Referrer-Policy"] = "same-origin"
     return response
+
+
+@app.middleware("http")
+async def public_prefix(request, call_next):
+    prefix = base_path.BASE_PATH
+    path = request.scope["path"]
+    if prefix and (path == prefix or path.startswith(prefix + "/")):
+        request.scope["path"] = path[len(prefix):] or "/"
+        raw_path = request.scope.get("raw_path", b"")
+        if raw_path.startswith(prefix.encode()):
+            request.scope["raw_path"] = raw_path[len(prefix):] or b"/"
+    if prefix:
+        request.scope["root_path"] = prefix
+    return await call_next(request)
 
 
 @app.get("/api/embed/config")
@@ -298,4 +313,4 @@ if PROFILES_ENABLED:
 # 정적 프론트엔드 (API 라우트 전부 등록된 다음 마지막에 마운트)
 # ---------------------------------------------------------------------------
 
-app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+app.mount("/", base_path.PublicStaticFiles(directory=STATIC_DIR, html=True), name="static")

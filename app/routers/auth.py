@@ -8,7 +8,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from .. import access_control, auth
+from .. import access_control, auth, base_path
 
 log = logging.getLogger("webtoon-server")
 # 로그인/기기 관리는 관리자 전용 개념이다 - 공유 프로필이 "/p/<토큰>/api/auth/..."로
@@ -31,12 +31,15 @@ async def login(body: LoginIn, request: Request, response: Response):
 
     label = request.headers.get("user-agent", "알 수 없는 기기")[:120]
     device_id = auth.create_remembered_device(label=label)
+    if base_path.BASE_PATH:
+        response.delete_cookie(DEVICE_COOKIE_NAME, path="/", httponly=True, samesite="lax")
     response.set_cookie(
         DEVICE_COOKIE_NAME,
         device_id,
         max_age=DEVICE_COOKIE_MAX_AGE,
         httponly=True,
         samesite="lax",
+        path=base_path.cookie_path(),
     )
     return {"ok": True}
 

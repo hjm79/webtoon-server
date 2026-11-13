@@ -3,9 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="webtoon-base-path" content="__WEBTOON_BASE_PATH__">
+<script src="__WEBTOON_BASE_PATH__/base-path.js"></script>
 <title>로그인 - 내 웹툰</title>
-<link rel="icon" href="/favicon.ico" sizes="any">
-<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="__WEBTOON_BASE_PATH__/favicon.ico" sizes="any">
+<link rel="stylesheet" href="__WEBTOON_BASE_PATH__/style.css">
 <style>
   body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
   .login-box { width: 260px; text-align: center; }
@@ -31,6 +33,7 @@
 </div>
 
 <script>
+window.fetch = WebtoonPaths.fetch;
 const input = document.getElementById("passwordInput");
 const btn = document.getElementById("submitBtn");
 const errorText = document.getElementById("errorText");
@@ -51,7 +54,7 @@ async function submit() {
       input.focus();
       return;
     }
-    location.href = "/";
+    location.href = WebtoonPaths.appPath("/");
   } catch (e) {
     errorText.textContent = "연결에 실패했습니다.";
   }

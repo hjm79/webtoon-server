@@ -3,9 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="webtoon-base-path" content="__WEBTOON_BASE_PATH__">
+<script src="__WEBTOON_BASE_PATH__/base-path.js"></script>
 <title>기기 승인 필요 - 내 웹툰</title>
-<link rel="icon" href="/favicon.ico" sizes="any">
-<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="__WEBTOON_BASE_PATH__/favicon.ico" sizes="any">
+<link rel="stylesheet" href="__WEBTOON_BASE_PATH__/style.css">
 <style>
   body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
   .device-box { width: 300px; text-align: center; }
@@ -27,13 +29,9 @@
 <div class="device-box" id="deviceBox">불러오는 중...</div>
 
 <script>
-const PROFILE_TOKEN = (() => {
-  const match = location.pathname.match(/^\/p\/([^/]+)/);
-  return match ? match[1] : null;
-})();
-
+const PROFILE_TOKEN = WebtoonPaths.profileToken;
 function apiUrl(path) {
-  return PROFILE_TOKEN ? `/p/${PROFILE_TOKEN}${path}` : path;
+  return WebtoonPaths.path(path);
 }
 
 const box = document.getElementById("deviceBox");

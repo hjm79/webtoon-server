@@ -294,7 +294,10 @@ def _scan_series_at_path(platform: str, series_ref: str, series_path: str) -> tu
         chapters_map[chapter_id] = full_path
 
     chapters.sort(key=lambda chapter: (chapter["sort_key"], chapter["filename"]))
-    chapter_mtimes = [os.path.getmtime(chapter["path"]) for chapter in chapters]
+    chapter_mtimes = []
+    for chapter in chapters:
+        chapter["mtime"] = os.path.getmtime(chapter["path"])
+        chapter_mtimes.append(chapter["mtime"])
     latest_mtime = max(chapter_mtimes, default=0)
 
     cover_path = _find_series_cover(series_path)

@@ -10,6 +10,8 @@ profile이 None(관리자)일 때는 access_control이 그대로 db.py에 위임
 
 import asyncio
 import math
+from datetime import datetime, timezone
+from html.parser import HTMLParser
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
@@ -18,6 +20,54 @@ from pydantic import BaseModel, Field, field_validator
 from .. import access_control, catalog, covers, db, profiles as profiles_module, scan, series_lists, services
 
 router = APIRouter()
+
+
+class _SummaryText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.hidden_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style"}:
+            self.hidden_depth += 1
+        elif not self.hidden_depth and tag in {"br", "p", "div", "li"}:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style"}:
+            self.hidden_depth = max(0, self.hidden_depth - 1)
+        elif not self.hidden_depth and tag in {"p", "div", "li"}:
+            self.parts.append(" ")
+
+    def handle_data(self, data):
+        if not self.hidden_depth:
+            self.parts.append(data)
+
+
+def _brief_summary(series: dict) -> str:
+    raw = (series.get("info") or {}).get("summary")
+    if not isinstance(raw, str):
+        return ""
+    parser = _SummaryText()
+    parser.feed(raw[:16384])
+    parser.close()
+    return " ".join("".join(parser.parts).split())[:1000].rstrip()
+
+
+def _latest_chapter(chapters: list) -> dict | None:
+    if not chapters:
+        return None
+    chapter = chapters[-1]
+    date = None
+    try:
+        timestamp = float(chapter.get("mtime", 0))
+        if math.isfinite(timestamp) and timestamp > 0:
+            date = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        pass
+    return {"id": chapter["id"], "label": chapter["label"], "date": date,
+            "date_source": "file_modified" if date else "unknown"}
 
 
 @router.get("/api/series")
@@ -48,6 +98,8 @@ def list_series(request: Request):
         unread = sum(1 for chapter in chapters if chapter["id"] not in read_ids)
 
         reading = services.reading_chapter(chapters, prog)
+        last_read_index = services.resolve_read_index(chapters, prog)
+        last_read = chapters[last_read_index] if last_read_index >= 0 else None
 
         if total == 0:
             progress_display = ""
@@ -77,6 +129,9 @@ def list_series(request: Request):
             "reading_now": reading is not None,
             "latest_update": series["latest_mtime"],
             "cover_url": covers.cover_url(series, access_control.profile_path_prefix(profile)),
+            "summary": _brief_summary(series),
+            "latest_chapter": _latest_chapter(chapters),
+            "recently_read_chapter": {"id": last_read["id"], "label": last_read["label"]} if last_read else None,
         }
         if profile is None:
             # 관리자 개인 정리 상태라, 공유 프로필 응답에는 아예 넣지 않는다

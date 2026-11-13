@@ -37,7 +37,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db, services
+from . import db, embedding, services
 from .routers import backup, chapters, integration, library, series, series_lists, settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -46,6 +46,7 @@ log = logging.getLogger("webtoon-server")
 PROFILES_ENABLED = os.environ.get("PROFILES_ENABLED", "").lower() == "true"
 STATIC_DIR = os.environ.get("STATIC_DIR", "/app/static")  # 미들웨어에서도 device-approval.html을 직접
 # 서빙해야 해서(기기 승인 대기 화면), 파일 맨 아래 정적 마운트보다 위로 옮겨서 정의한다.
+EMBED_ALLOWED_ORIGINS = embedding.parse_allowed_origins(os.environ.get("EMBED_ALLOWED_ORIGINS", ""))
 
 app = FastAPI(title="webtoon-server")
 
@@ -103,6 +104,7 @@ _ADMIN_GATE_ALLOWLIST = (
     "/api/lookup/read-state",
     "/api/integration/rescan",  # 토큰(INTEGRATION_TOKEN)으로 따로 인증한다 — 라우터에서 확인(routers/integration.py)
     "/api/integration/scan-status",
+    "/api/embed/config",
 )
 
 
@@ -200,6 +202,22 @@ async def profile_and_admin_gate(request, call_next):
     if path.startswith("/api/"):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
     return RedirectResponse("/login.html")
+
+
+@app.middleware("http")
+async def reader_frame_policy(request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = embedding.frame_ancestors(EMBED_ALLOWED_ORIGINS)
+    if not EMBED_ALLOWED_ORIGINS:
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "same-origin"
+    return response
+
+
+@app.get("/api/embed/config")
+def embed_config():
+    return {"enabled": bool(EMBED_ALLOWED_ORIGINS), "allowed_origins": list(EMBED_ALLOWED_ORIGINS),
+            "protocol": "webtoon-reader", "version": 1}
 
 
 # ---------------------------------------------------------------------------

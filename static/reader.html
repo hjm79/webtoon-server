@@ -46,6 +46,10 @@
 
 <div id="pages" class="pages"></div>
 <div id="positioningOverlay" class="positioning-overlay" style="display:none">이어보던 위치로 이동 중…</div>
+<div id="progressSaveError" class="reader-save-error" role="alert" hidden>
+  <span>읽은 위치를 저장하지 못해 닫지 않았습니다. 연결을 확인하고 다시 시도해주세요.</span>
+  <button id="retrySaveAndClose" type="button">다시 저장하고 닫기</button>
+</div>
 
 <aside id="sidebar" class="sidebar">
   <div class="sidebar-header">
@@ -56,6 +60,8 @@
 </aside>
 <div id="sidebarOverlay" class="sidebar-overlay"></div>
 
+<script src="embed.js"></script>
+<script src="reader-position.js"></script>
 <script>
 // index.html과 동일한 방식 - 공유 프로필 링크("/p/<토큰>/...")로 접속했는지 감지해서,
 // 이 화면에서 나가는 모든 /api/* 요청에 자동으로 그 토큰 경로를 붙인다.
@@ -81,8 +87,42 @@ function withProfilePrefix(path) {
 
 const params = new URLSearchParams(location.search);
 const seriesId = params.get("series");
-const initialChapterId = params.get("chapter");
-const initialPage = parseInt(params.get("page") || "0", 10) || 0;
+let initialChapterId = params.get("chapter");
+let initialPage = parseInt(params.get("page") || "0", 10) || 0;
+const embedRequested = params.get("embed") === "1";
+let embedBridge = null;
+
+async function initializeEmbed() {
+  if (!embedRequested) return true;
+  try {
+    const response = await fetch("/api/embed/config");
+    if (!response.ok) throw new Error("embed config unavailable");
+    const config = await response.json();
+    embedBridge = WebtoonReaderEmbed.createBridge({
+      window,
+      parentOrigin: params.get("parent_origin"),
+      allowedOrigins: config.allowed_origins,
+      onClose: () => leaveReaderForList(),
+    });
+    if (!config.enabled || !embedBridge.active) throw new Error("parent origin not allowed");
+    document.body.classList.add("reader-embedded");
+    const backLink = document.getElementById("backLink");
+    backLink.setAttribute("aria-label", "관리기로 돌아가기");
+    backLink.title = "관리기로 돌아가기";
+    return true;
+  } catch (_) {
+    pagesEl.textContent = "이 관리기에서는 내장 읽기가 허용되지 않습니다. 별도 뷰어에서 열어주세요.";
+    return false;
+  }
+}
+
+function postReaderEvent(type, payload = {}) {
+  if (embedBridge) embedBridge.post(type, { series_id: seriesId, ...payload });
+}
+
+function setProgressSaveError(visible) {
+  document.getElementById("progressSaveError").hidden = !visible;
+}
 
 document.getElementById("backLink").href = withProfilePrefix("/");
 
@@ -146,6 +186,7 @@ const zoomValueLabelEl = document.getElementById("zoomValueLabel");
 
 function showError() {
   pagesEl.innerHTML = `<div class="empty-state">회차를 불러올 수 없습니다.</div>`;
+  postReaderEvent("error", { message: "회차를 불러올 수 없습니다." });
 }
 
 function showTimeRestrictedMessage(windows) {
@@ -155,6 +196,7 @@ function showTimeRestrictedMessage(windows) {
     .map((w) => `${dayLabels[w.day_of_week]} ${formatMinutes(w.start_minute)}~${formatMinutes(w.end_minute)}`)
     .join(", ");
   pagesEl.innerHTML = `<div class="empty-state">지금은 웹툰 보는 시간이 아니에요.<br>웹툰은 ${scheduleText || "정해진 시간"}에만 볼 수 있어요.<br>요일과 시간 변경을 원하시면 관리자에게 요청하세요.</div>`;
+  postReaderEvent("error", { message: "지금은 이 프로필에 허용된 읽기 시간이 아닙니다." });
 }
 
 let positioningTimer = null;
@@ -283,10 +325,17 @@ async function leaveReaderForList(event) {
   document.body.classList.remove("reader-fullscreen");
   await exitBrowserFullscreen();
   updateFullscreenButton();
+  if (embedBridge?.active) {
+    const saved = await saveProgressNow({ keepalive: true });
+    if (!saved) return;
+    postReaderEvent("close", { chapter_id: currentChapterId, page_index: currentPageIndex });
+    return;
+  }
   window.location.href = withProfilePrefix("/");
 }
 
 document.getElementById("backLink").addEventListener("click", leaveReaderForList);
+document.getElementById("retrySaveAndClose").addEventListener("click", leaveReaderForList);
 
 async function loadScrollSpeed() {
   // 서버 설정을 우선 사용하되, 서버에 값이 없거나 요청에 실패하면
@@ -418,7 +467,7 @@ function jumpScreen(direction) {
 
 function handleScrollKeyDown(event) {
   const tag = event.target && event.target.tagName;
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || event.ctrlKey || event.metaKey || event.altKey) {
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON" || event.ctrlKey || event.metaKey || event.altKey) {
     return;
   }
 
@@ -648,11 +697,18 @@ const pageObserver = new IntersectionObserver(
 const visiblePages = new Map();
 
 function updateCurrentFromVisible() {
-  if (visiblePages.size === 0) return;
+  if (visiblePages.size === 0 || pagesEl.classList.contains("positioning")) return;
   let top = null;
   for (const el of visiblePages.values()) {
     const rect = el.getBoundingClientRect();
+    if (!el.complete || !el.naturalWidth || !el.naturalHeight || rect.height <= 0
+        || rect.bottom <= 0 || rect.top >= window.innerHeight) continue;
     if (!top || rect.top < top.rect.top) top = { el, rect };
+  }
+  if (!top) return;
+  for (const img of pagesEl.querySelectorAll("img")) {
+    if (!img.complete || !img.naturalWidth || !img.naturalHeight || img.getBoundingClientRect().height <= 0) return;
+    if (img === top.el) break;
   }
   const chapterId = top.el.dataset.chapter;
   const pageIndex = parseInt(top.el.dataset.page, 10);
@@ -671,7 +727,7 @@ function onPositionChange() {
 }
 
 function saveProgressNow({ keepalive = false } = {}) {
-  if (!currentChapterId) return;
+  if (!currentChapterId) return Promise.resolve(true);
 
   clearTimeout(saveTimer);
   saveTimer = null;
@@ -683,7 +739,20 @@ function saveProgressNow({ keepalive = false } = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chapter_id: chapterId, page_index: pageIndex }),
     keepalive,
-  }).catch(() => {});
+  }).then((response) => {
+    if (response.ok) {
+      setProgressSaveError(false);
+      postReaderEvent("progress", { chapter_id: chapterId, page_index: pageIndex });
+      return true;
+    }
+    if (embedBridge?.active) setProgressSaveError(true);
+    postReaderEvent("error", { code: "progress_save_failed", message: "읽은 위치를 저장하지 못했습니다. 다시 시도해주세요." });
+    return false;
+  }).catch(() => {
+    if (embedBridge?.active) setProgressSaveError(true);
+    postReaderEvent("error", { code: "progress_save_failed", message: "읽은 위치를 저장하지 못했습니다. 다시 시도해주세요." });
+    return false;
+  });
 }
 
 function scheduleSaveProgress() {
@@ -705,7 +774,7 @@ function confirmLastChapterAtDocumentEnd() {
   requestAnimationFrame(() => {
     endOfDocumentCheckQueued = false;
 
-    if (!seriesData || !currentChapterId) return;
+    if (!seriesData || !currentChapterId || pagesEl.classList.contains("positioning")) return;
     if (currentChapterId !== seriesData.chapters[seriesData.chapters.length - 1]?.id) return;
 
     const bottomGap = document.documentElement.scrollHeight - (window.scrollY + window.innerHeight);
@@ -714,6 +783,11 @@ function confirmLastChapterAtDocumentEnd() {
     const lastChapter = seriesData.chapters[seriesData.chapters.length - 1];
     const lastImage = pagesEl.querySelector(`img[data-chapter="${CSS.escape(lastChapter.id)}"]:last-of-type`);
     if (!lastImage) return;
+    const images = pagesEl.querySelectorAll("img");
+    if ([...images].some((img) => !img.complete || !img.naturalWidth || !img.naturalHeight
+        || img.getBoundingClientRect().height <= 0)) return;
+    const lastRect = lastImage.getBoundingClientRect();
+    if (lastRect.bottom <= 0 || lastRect.top >= window.innerHeight || lastRect.bottom > window.innerHeight + 24) return;
 
     const lastPageIndex = parseInt(lastImage.dataset.page, 10);
     if (!Number.isFinite(lastPageIndex)) return;
@@ -756,6 +830,12 @@ function prefetchImages(urls) {
   }
 }
 
+function pageImageLoaded(img) {
+  sizeImageForFullscreen(img);
+  updateCurrentFromVisible();
+  confirmLastChapterAtDocumentEnd();
+}
+
 async function prefetchNextChapter(afterChapterId) {
   const idx = chapterIndexById(afterChapterId);
   const next = idx >= 0 ? seriesData.chapters[idx + 1] : null;
@@ -789,7 +869,7 @@ async function revealSkippedPages(chapter, skipCount, wrapEl) {
     img.dataset.key = `${chapter.id}:${i}`;
     img.src = withProfilePrefix(`/api/chapters/${encodeURIComponent(chapter.id)}/pages/${i}`);
     img.alt = `${i + 1}페이지`;
-    img.addEventListener("load", () => sizeImageForFullscreen(img));
+    img.addEventListener("load", () => pageImageLoaded(img));
     pageObserver.observe(img);
     frag.appendChild(img);
   }
@@ -839,7 +919,7 @@ async function appendChapter(chapter, { scrollToPage = null, skipPages = 0 } = {
     img.dataset.key = `${chapter.id}:${i}`;
     img.src = withProfilePrefix(`/api/chapters/${encodeURIComponent(chapter.id)}/pages/${i}`);
     img.alt = `${i + 1}페이지`;
-    img.addEventListener("load", () => sizeImageForFullscreen(img));
+    img.addEventListener("load", () => pageImageLoaded(img));
     pagesEl.appendChild(img);
     pageObserver.observe(img);
     lastImg = img;
@@ -1061,7 +1141,13 @@ pagesEl.addEventListener("click", (e) => {
 // ---------------------------------------------------------------------
 
 async function load() {
-  if (!seriesId || !initialChapterId) return showError();
+  if (!await initializeEmbed()) return;
+  const position = await WebtoonReaderPosition.resolve({
+    seriesId, chapterId: initialChapterId, pageIndex: initialPage,
+    fetcher: window.fetch.bind(window),
+  });
+  initialChapterId = position.chapterId;
+  initialPage = position.pageIndex;
 
   // 전체화면/스크롤속도/확대축소를 웹툰별로 따로 볼지, 전체 공통으로 볼지부터 정해야
   // 나머지 세 설정을 어느 키로 읽고 쓸지 알 수 있다.
@@ -1099,9 +1185,10 @@ async function load() {
   if (initialPage > 0) beginPositioning();
 
   await appendChapter(startChapter, { scrollToPage: initialPage });
+  if (pagesEl.querySelector("img")) postReaderEvent("ready", { chapter_id: currentChapterId, page_index: currentPageIndex });
 }
 
-load();
+load().catch(showError);
 </script>
 </body>
 </html>

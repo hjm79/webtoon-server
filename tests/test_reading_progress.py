@@ -42,6 +42,26 @@ def test_save_progress_marks_earlier_chapters_as_read(client, library):
     assert updated[2]["read"] is False and updated[2]["reading"] is False
 
 
+def test_series_only_entry_continuation_preserves_current_chapter_and_page(client, library):
+    _setup_three_chapters(library)
+    client.post("/api/rescan")
+    sid = client.get("/api/series").json()[0]["id"]
+    chapters = client.get(f"/api/series/{sid}/chapters").json()["chapters"]
+    client.put(f"/api/series/{sid}/progress", json={"chapter_id": chapters[1]["id"], "page_index": 1})
+
+    assert client.get(f"/api/series/{sid}/continue").json() == {"chapter_id": chapters[1]["id"], "page_index": 1}
+
+
+def test_series_only_entry_advances_after_completed_chapter(client, library):
+    _setup_three_chapters(library)
+    client.post("/api/rescan")
+    sid = client.get("/api/series").json()[0]["id"]
+    chapters = client.get(f"/api/series/{sid}/chapters").json()["chapters"]
+    client.put(f"/api/series/{sid}/read-state", json={"scope": "chapter", "read": True, "chapter_id": chapters[0]["id"]})
+
+    assert client.get(f"/api/series/{sid}/continue").json() == {"chapter_id": chapters[1]["id"], "page_index": 0}
+
+
 def test_toggle_unread_on_currently_reading_chapter_moves_continue_position_back(client, library):
     """GIVEN 15화를 읽는 중인 상태에서 14화까지 이미 읽은 웹툰이 있을 때(회차 15개)"""
     for n in range(1, 16):

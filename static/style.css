@@ -697,6 +697,33 @@ a {
   transition: opacity 0.2s ease;
 }
 
+.reader-save-error {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #d39b43;
+  border-radius: 8px;
+  background: #322719;
+  color: #fff2d8;
+}
+
+.reader-save-error[hidden] {
+  display: none;
+}
+
+.reader-save-error button {
+  color: #fff2d8;
+  border-color: #d39b43;
+}
+
 .reader-topbar-row {
   display: flex;
   align-items: center;

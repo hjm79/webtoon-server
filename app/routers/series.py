@@ -95,13 +95,11 @@ def profiles_allowed_ids(profile: dict | None) -> set[str] | None:
 
 def _find_series_by_title(series: str, platform: str | None) -> dict | None:
     """시리즈 폴더명(과 선택적으로 플랫폼 폴더명)으로 시리즈를 찾는다. lookup 계열 API가 공유한다."""
-    for candidate in catalog.get_series_map().values():
-        if candidate["title"] != series:
-            continue
-        if platform is not None and candidate["platform"] != platform:
-            continue
-        return candidate
-    return None
+    matches = [candidate for candidate in catalog.get_series_map().values()
+               if candidate["title"] == series and (platform is None or candidate["platform"] == platform)]
+    if len(matches) > 1:
+        raise HTTPException(409, detail={"reason": "ambiguous_series", "platforms": sorted({c["platform"] for c in matches})})
+    return matches[0] if matches else None
 
 
 @router.get("/api/lookup/latest", dependencies=[Depends(access_control.require_admin)])

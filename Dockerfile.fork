@@ -1,0 +1,4 @@
+ARG BASE_IMAGE=ghcr.io/murianwind/webtoon-server@sha256:c52306119b387814af3ba5518b6a4074708d2b8ec2394057fbbb8c87cc2593da
+FROM ${BASE_IMAGE}
+COPY app /app/app
+COPY static /app/static

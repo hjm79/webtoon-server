@@ -44,5 +44,6 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: Dockerfile.fork
           push: true
           tags: ${{ steps.image.outputs.name }}:latest

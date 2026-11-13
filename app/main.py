@@ -51,6 +51,11 @@ app = FastAPI(title="webtoon-server")
 
 # 커버/페이지 이미지는 내용이 거의 안 바뀌니 캐싱이 오히려 유리해서 캐시 금지 대상에서 뺀다.
 _CACHEABLE_IMAGE_PATH = re.compile(r"^/api/series/[^/]+/cover$|^/api/chapters/[^/]+/pages/\d+$")
+_SUPPORTER_COVER_PATH = re.compile(r"^/api/supporter/covers/[A-Za-z0-9_-]{1,128}$")
+
+
+def _is_supporter_endpoint(path):
+    return path in ("/api/supporter/shelf", "/api/supporter/health") or bool(_SUPPORTER_COVER_PATH.fullmatch(path))
 
 
 @app.middleware("http")
@@ -138,7 +143,7 @@ async def profile_and_admin_gate(request, call_next):
             return JSONResponse({"detail": "profile link not found"}, status_code=404)
         request.state.profile = profile
         rest = "/" + parts[3] if len(parts) > 3 else "/"
-        if rest in ("/api/supporter/shelf", "/api/supporter/health"):
+        if _is_supporter_endpoint(rest):
             return JSONResponse({"detail": "Not Found"}, status_code=404, headers={"Cache-Control": "no-store"})
 
         # 기기 승인 게이트 - 최대 2대까지는 자동 등록, 3번째부터는 관리자 승인이
@@ -199,7 +204,7 @@ async def profile_and_admin_gate(request, call_next):
         auth.touch_device(device_id)
         return await call_next(request)
 
-    if path in ("/api/supporter/shelf", "/api/supporter/health"):
+    if _is_supporter_endpoint(path):
         return await call_next(request)
 
     if any(path == allowed or path.startswith(allowed) for allowed in _ADMIN_GATE_ALLOWLIST):

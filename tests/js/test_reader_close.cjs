@@ -59,8 +59,8 @@ test("network failure keeps embedded reader open and a retry saves the same posi
   assert.equal(ctx.banner.hidden, true);
   assert.deepEqual(ctx.messages.map((m) => m.type), ["error", "progress", "close"]);
   assert.deepEqual(ctx.requests.map((r) => JSON.parse(r.options.body)), [
-    { chapter_id: "chapter-7", page_index: 4 },
-    { chapter_id: "chapter-7", page_index: 4 },
+    { chapter_id: "chapter-7", page_index: 4, completed: false },
+    { chapter_id: "chapter-7", page_index: 4, completed: false },
   ]);
 });
 

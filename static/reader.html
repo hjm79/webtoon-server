@@ -714,12 +714,14 @@ function updateReaderPosition() {
 
 function updateCurrentFromVisible() {
   if (pagesEl.classList.contains("positioning")) return;
-  let top = null;
-  for (const el of pagesEl.querySelectorAll("img")) {
-    const rect = el.getBoundingClientRect();
-    if (!el.complete || !el.naturalWidth || !el.naturalHeight || rect.height <= 0
-        || rect.bottom <= 0 || rect.top >= window.innerHeight) continue;
-    if (!top || rect.top < top.rect.top) top = { el, rect };
+  let top = completedDocumentPosition();
+  if (!top) {
+    for (const el of pagesEl.querySelectorAll("img")) {
+      const rect = el.getBoundingClientRect();
+      if (!el.complete || !el.naturalWidth || !el.naturalHeight || rect.height <= 0
+          || rect.bottom <= 0 || rect.top >= window.innerHeight) continue;
+      if (!top || rect.top < top.rect.top) top = { el, rect };
+    }
   }
   if (!top) return;
   for (const img of pagesEl.querySelectorAll("img")) {
@@ -740,12 +742,35 @@ function updateCurrentFromVisible() {
   }
 }
 
+function completedDocumentPosition() {
+  if (typeof seriesData === "undefined" || !seriesData || !currentChapterId
+      || pagesEl.classList.contains("positioning")) return null;
+  const lastChapter = seriesData.chapters.at(-1);
+  if (!lastChapter) return null;
+  const bottomGap = document.documentElement.scrollHeight - (window.scrollY + window.innerHeight);
+  if (bottomGap > 24) return null;
+  const images = [...pagesEl.querySelectorAll("img")];
+  const lastImage = images.filter((img) => img.dataset.chapter === lastChapter.id).at(-1);
+  if (!lastImage || !lastImage.complete || !lastImage.naturalWidth || !lastImage.naturalHeight) return null;
+  if (images.some((img) => {
+    const rect = img.getBoundingClientRect();
+    return rect.height <= 0 || img.dataset.imageState === "failed"
+      || (rect.bottom > 0 && rect.top < window.innerHeight
+        && (!img.complete || !img.naturalWidth || !img.naturalHeight));
+  })) return null;
+  const rect = lastImage.getBoundingClientRect();
+  if (rect.bottom <= 0 || rect.top >= window.innerHeight || rect.bottom > window.innerHeight + 24) return null;
+  if (!Number.isInteger(Number(lastImage.dataset.page)) || Number(lastImage.dataset.page) < 0) return null;
+  return { el: lastImage, rect };
+}
+
 
 function onPositionChange() {
   const ch = chapterById(currentChapterId);
   chapterTitleEl.textContent = ch ? `${seriesData.title} · ${ch.label}` : seriesData.title;
   highlightSidebar();
   updateReaderPosition();
+  updateUrlState(currentChapterId, currentPageIndex, currentPageOffset);
   scheduleSaveProgress();
 }
 
@@ -775,7 +800,10 @@ function saveProgressNow({ keepalive = false } = {}) {
     postReaderEvent("error", { code: "page_image_failed", message });
     return Promise.resolve(false);
   }
-  const body = { chapter_id: chapterId, page_index: pageIndex };
+  const endPosition = typeof completedDocumentPosition === "function" ? completedDocumentPosition() : null;
+  const completed = !!endPosition && endPosition.el.dataset.chapter === chapterId
+    && Number(endPosition.el.dataset.page) === pageIndex;
+  const body = { chapter_id: chapterId, page_index: pageIndex, completed };
   if (typeof currentPageOffset === "number" && currentPageOffset > 0) body.page_offset = currentPageOffset;
   return fetch(`/api/series/${encodeURIComponent(seriesId)}/progress`, {
     method: "PUT",
@@ -808,8 +836,8 @@ function scheduleSaveProgress() {
 
 // 마지막 회차에는 다음 회차 진입 이벤트가 없으므로, 실제 문서의 끝에
 // 도달했을 때 마지막 이미지까지 읽은 것으로 한 번 더 확정한다.
-// 기존 IntersectionObserver 기반 페이지 판정은 그대로 유지하고,
-// 문서 끝에서만 누락 가능성을 보완한다.
+// 일반 위치 저장도 같은 판정을 사용해 짧은 마지막 이미지가 이전 페이지로
+// 되돌아가지 않도록 한다.
 let endOfDocumentCheckQueued = false;
 function confirmLastChapterAtDocumentEnd() {
   if (endOfDocumentCheckQueued) return;
@@ -817,38 +845,11 @@ function confirmLastChapterAtDocumentEnd() {
   requestAnimationFrame(() => {
     endOfDocumentCheckQueued = false;
 
-    if (!seriesData || !currentChapterId || pagesEl.classList.contains("positioning")) return;
-    if (currentChapterId !== seriesData.chapters[seriesData.chapters.length - 1]?.id) return;
-
-    const bottomGap = document.documentElement.scrollHeight - (window.scrollY + window.innerHeight);
-    if (bottomGap > 24) return;
-
-    const lastChapter = seriesData.chapters[seriesData.chapters.length - 1];
-    const lastImage = [...pagesEl.querySelectorAll("img")].filter((img) => img.dataset.chapter === lastChapter.id).at(-1);
-    if (!lastImage) return;
-    const images = pagesEl.querySelectorAll("img");
-    if ([...images].some((img) => img.getBoundingClientRect().height <= 0 || img.dataset.imageState === "failed")) return;
-    if (!lastImage.complete || !lastImage.naturalWidth || !lastImage.naturalHeight) return;
-    const lastRect = lastImage.getBoundingClientRect();
-    if (lastRect.bottom <= 0 || lastRect.top >= window.innerHeight || lastRect.bottom > window.innerHeight + 24) return;
-
-    const lastPageIndex = parseInt(lastImage.dataset.page, 10);
-    if (!Number.isFinite(lastPageIndex)) return;
-
-    const changed = currentChapterId !== lastChapter.id || currentPageIndex !== lastPageIndex;
-    currentChapterId = lastChapter.id;
-    currentPageIndex = lastPageIndex;
-    currentPageOffset = 0;
-    if (changed) {
-      const ch = chapterById(currentChapterId);
-      chapterTitleEl.textContent = ch ? `${seriesData.title} · ${ch.label}` : seriesData.title;
-      highlightSidebar();
-      if (typeof updateReaderPosition === "function") updateReaderPosition();
-      updateUrlState(currentChapterId, currentPageIndex);
-    }
+    if (!completedDocumentPosition()) return;
+    updateCurrentFromVisible();
 
     // 마지막 회차의 마지막 페이지에 도달한 순간에는 debounce를 기다리지 않고
-    // 즉시 저장한다. 서버의 기존 마지막 회차 read_chapters 판정은 그대로 사용한다.
+    // 즉시 저장하며, 실제 끝을 확인한 경우에만 completed를 전송한다.
     saveProgressNow({ keepalive: true });
   });
 }
@@ -1150,11 +1151,16 @@ function highlightSidebar() {
   }
 }
 
-function updateUrlState(chapterId, page) {
+function updateUrlState(chapterId, page, offset = 0) {
   const p = new URLSearchParams(location.search);
   p.set("series", seriesId);
   p.set("chapter", chapterId);
   p.set("page", String(page));
+  if (typeof offset === "number" && Number.isFinite(offset) && offset > 0 && offset <= 1) {
+    p.set("page_offset", String(offset));
+  } else {
+    p.delete("page_offset");
+  }
   history.replaceState(null, "", `${location.pathname}?${p.toString()}`);
 }
 

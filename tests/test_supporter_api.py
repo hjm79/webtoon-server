@@ -1,11 +1,12 @@
 import sqlite3
+import zipfile
 from datetime import datetime, timezone
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import base_path, catalog, db, scan, services
+from app import base_path, catalog, covers, db, scan, services
 from app.routers import supporter
 
 TOKEN = "supporter-test-only-token-with-32-bytes"
@@ -46,7 +47,7 @@ def metadata_stub(monkeypatch, values=None):
     monkeypatch.setattr(db, "get_progress_metadata", lambda sid: (values or {}).get(sid), raising=False)
 
 
-@pytest.mark.parametrize("path", ["/api/supporter/shelf", "/api/supporter/health"])
+@pytest.mark.parametrize("path", ["/api/supporter/shelf", "/api/supporter/health", "/api/supporter/covers/example"])
 def test_dedicated_bearer_token_is_required(supporter_client, monkeypatch, path):
     for headers in ({}, {"Authorization": "Bearer wrong"}, {"X-Integration-Token": TOKEN},
                     {"Authorization": "bearer " + TOKEN}, {"Authorization": "Bearer " + TOKEN + " "}):
@@ -66,7 +67,7 @@ def test_dedicated_bearer_token_is_required(supporter_client, monkeypatch, path)
     assert response.headers["cache-control"] == "no-store"
 
 
-@pytest.mark.parametrize("path", ["/api/supporter/shelf", "/api/supporter/health"])
+@pytest.mark.parametrize("path", ["/api/supporter/shelf", "/api/supporter/health", "/api/supporter/covers/example"])
 def test_shared_profiles_cannot_read_admin_summaries(supporter_client, path):
     assert supporter_client.get(path, headers={**HEADERS, "X-Test-Profile": "yes"}).status_code == 404
     assert supporter_client.get("/p/shared" + path, headers=HEADERS).status_code == 404
@@ -104,7 +105,7 @@ def test_shelf_uses_public_links_and_existing_local_progress(supporter_client, m
     item = body["items"][0]
     assert item == {
         "id": "series-a", "title": "긴 웹툰", "platform": "naver",
-        "coverUrl": PUBLIC + "/api/series/series-a/cover?v=" + supporter.covers.cover_version(catalog.get_series("series-a")),
+        "coverUrl": PUBLIC + "/api/supporter/covers/series-a?v=" + supporter.covers.cover_version(catalog.get_series("series-a")),
         "href": PUBLIC + "/reader.html?series=series-a", "lastReadAt": "1970-01-01T00:20:00+00:00",
         "pageIndex": 4, "pageOffset": 0.375, "chapterCount": 2, "unreadCount": 1,
         "lastChapter": "1화", "latestChapter": "2화", "isNew": True, "readingNow": True,
@@ -163,6 +164,8 @@ def test_reads_do_not_scan_open_zips_migrate_or_write_state(supporter_client, mo
         response = supporter_client.get(path, headers=HEADERS)
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
+        if path.endswith("/shelf"):
+            assert response.json()["items"][0]["unreadCount"] == 1
     with sqlite3.connect(db.DB_PATH) as connection:
         assert list(connection.iterdump()) == before
     health = supporter_client.get("/api/supporter/health", headers=HEADERS).json()
@@ -178,3 +181,123 @@ def test_empty_library_and_lan_public_origin_are_supported(supporter_client, mon
     assert response.status_code == 200
     assert response.json()["baseUrl"] == "http://192.168.1.26:8230/viewer"
     assert response.json()["items"] == []
+
+
+@pytest.mark.parametrize("chapter_index,page_index,explicit_indices,expected_unread", [
+    (0, 3, (), 3),
+    (1, 3, (), 2),
+    (1, db.PAGE_FINISHED_SENTINEL, (), 1),
+    (2, db.PAGE_FINISHED_SENTINEL, (), 0),
+    (3, 3, (), 3),
+    (2, db.PAGE_FINISHED_SENTINEL, (0,), 2),
+])
+def test_legacy_unread_matches_viewer_without_migrating(
+    supporter_client, monkeypatch, chapter_index, page_index, explicit_indices, expected_unread
+):
+    chapters = add_series("legacy-cursor", chapters=3)
+    chapter_id = chapters[chapter_index]["id"] if chapter_index < len(chapters) else "removed-chapter"
+    db.set_progress("legacy-cursor", chapter_id, chapter_index, page_index)
+    db.mark_chapters_read("legacy-cursor", [chapters[index]["id"] for index in explicit_indices])
+    with sqlite3.connect(db.DB_PATH) as connection:
+        before = list(connection.iterdump())
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("supporter attempted to migrate legacy progress")
+
+    monkeypatch.setattr(services, "migrate_legacy_progress_if_needed", forbidden)
+    monkeypatch.setattr(db, "mark_chapters_read", forbidden)
+    response = supporter_client.get("/api/supporter/shelf", headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json()["items"][0]["unreadCount"] == expected_unread
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert list(connection.iterdump()) == before
+
+
+def test_cached_supporter_cover_needs_no_library_io(supporter_client, monkeypatch):
+    add_series("cached", timestamp=2000)
+    monkeypatch.setattr(covers, "_cache", {"cached": (2000, b"cached-jpeg", "image/jpeg")})
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("cached supporter cover attempted library IO")
+
+    monkeypatch.setattr(services, "run_platform_io", forbidden)
+    monkeypatch.setattr(services, "start_background_scan", forbidden)
+    monkeypatch.setattr(scan, "list_zip_image_names", forbidden)
+    before = db.export_backup_data()
+    response = supporter_client.get("/api/supporter/covers/cached?v=version", headers=HEADERS)
+    assert response.status_code == 200
+    assert response.content == b"cached-jpeg"
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.headers["cache-control"] == "no-store"
+    assert db.export_backup_data() == before
+
+
+def test_cover_cache_miss_generates_only_requested_local_cover(supporter_client, library, monkeypatch):
+    from PIL import Image
+
+    add_series("new-cover")
+    add_series("untouched")
+    image_path = library / "cover.jpg"
+    Image.new("RGB", (16, 24), "blue").save(image_path)
+    catalog.get_series("new-cover")["cover_path"] = str(image_path)
+    monkeypatch.setattr(covers, "_cache", {})
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("single cover request attempted library scan or ZIP IO")
+
+    monkeypatch.setattr(services, "start_background_scan", forbidden)
+    monkeypatch.setattr(scan, "list_zip_image_names", forbidden)
+    response = supporter_client.get("/api/supporter/covers/new-cover", headers=HEADERS)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.content.startswith(b"\xff\xd8")
+    assert set(covers._cache) == {"new-cover"}
+
+
+@pytest.mark.parametrize("series_id", ["unknown", "excluded", "bad.id"])
+def test_cover_unknown_excluded_or_malformed_is_not_found(supporter_client, monkeypatch, series_id):
+    add_series("excluded", excluded=True)
+    add_series("bad.id")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unavailable cover attempted library IO")
+
+    monkeypatch.setattr(services, "ensure_cover_cached", forbidden)
+    response = supporter_client.get("/api/supporter/covers/" + series_id, headers=HEADERS)
+    assert response.status_code == 404
+    assert response.headers["cache-control"] == "no-store"
+    assert "/private/" not in response.text
+
+
+@pytest.mark.parametrize("failure,status", [(TimeoutError, 504), (FileNotFoundError, 404), (zipfile.BadZipFile, 404)])
+def test_cover_generation_failure_is_private(supporter_client, monkeypatch, failure, status):
+    add_series("unavailable")
+
+    async def unavailable(series):
+        raise failure("/private/library/secret.zip")
+
+    monkeypatch.setattr(services, "ensure_cover_cached", unavailable)
+    response = supporter_client.get("/api/supporter/covers/unavailable", headers=HEADERS)
+    assert response.status_code == status
+    assert response.headers["cache-control"] == "no-store"
+    assert "/private/" not in response.text
+
+
+def test_cover_generation_has_bounded_wait(supporter_client, monkeypatch):
+    import asyncio
+
+    add_series("slow-cover")
+    cancelled = []
+
+    async def slow_cover(series):
+        try:
+            await asyncio.sleep(30)
+        finally:
+            cancelled.append(True)
+
+    monkeypatch.setattr(services, "ensure_cover_cached", slow_cover)
+    monkeypatch.setattr(services, "SERIES_SCAN_TIMEOUT_SECONDS", 0.01)
+    response = supporter_client.get("/api/supporter/covers/slow-cover", headers=HEADERS)
+    assert response.status_code == 504
+    assert response.headers["cache-control"] == "no-store"
+    assert cancelled == [True]

@@ -16,12 +16,35 @@
     let active = 0;
     let disposed = false;
     const observer = observerFactory((entries) => {
-      for (const entry of entries) if (entry.isIntersecting) ensure(entry.target);
+      for (const entry of entries) {
+        const record = records.get(entry.target);
+        if (record) record.visible = entry.isIntersecting;
+      }
+      for (const entry of entries) {
+        const record = records.get(entry.target);
+        if (!record) continue;
+        if (record.visible && record.state === "idle") enqueue(record);
+        else if (!record.visible && !record.pinned && record.state === "queued") {
+          const index = queue.indexOf(record);
+          if (index >= 0) queue.splice(index, 1);
+          record.state = "idle";
+          record.img.dataset.imageState = "idle";
+        }
+      }
+      drain();
     }, { rootMargin: "1200px 0px" });
+
+    function enqueue(record, priority = false) {
+      record.state = "queued";
+      record.img.dataset.imageState = "queued";
+      if (priority) queue.unshift(record);
+      else queue.push(record);
+    }
 
     function finish(record, success) {
       if (record.state === "loading") active--;
       record.state = success ? "loaded" : "failed";
+      record.pinned = false;
       if (success) onLoaded(record.img);
       else if (!disposed && record.img.isConnected) onFailed(record.img, () => retry(record.img));
       record.resolve?.(success);
@@ -45,16 +68,21 @@
         if (record.attempts++ < maxRetries) {
           active--;
           record.state = "waiting";
+          img.dataset.imageState = "waiting";
           record.timer = schedule(() => {
             record.timer = null;
             if (disposed || !img.isConnected) {
               record.state = "failed";
+              record.pinned = false;
               record.resolve?.(false);
               record.resolve = null;
               return;
             }
-            record.state = "queued";
-            queue.push(record);
+            if (record.visible || record.pinned) enqueue(record);
+            else {
+              record.state = "idle";
+              img.dataset.imageState = "idle";
+            }
             drain();
           }, 750 * record.attempts);
           drain();
@@ -75,8 +103,14 @@
         if (record.state !== "queued") continue;
         if (!record.img.isConnected) {
           record.state = "failed";
+          record.pinned = false;
           record.resolve?.(false);
           record.resolve = null;
+          continue;
+        }
+        if (!record.visible && !record.pinned) {
+          record.state = "idle";
+          record.img.dataset.imageState = "idle";
           continue;
         }
         start(record);
@@ -88,11 +122,10 @@
       if (!record || disposed) return Promise.resolve(false);
       if (record.state === "loaded") return Promise.resolve(true);
       if (record.state === "failed") return Promise.resolve(false);
+      record.pinned = true;
       if (!record.promise) record.promise = new Promise((resolve) => { record.resolve = resolve; });
       if (record.state === "idle") {
-        record.state = "queued";
-        if (priority) queue.unshift(record);
-        else queue.push(record);
+        enqueue(record, priority);
         drain();
       } else if (priority && record.state === "queued") {
         const index = queue.indexOf(record);
@@ -121,7 +154,8 @@
       } else {
         img.style.aspectRatio = "3 / 4";
       }
-      records.set(img, { img, url, state: "idle", attempts: 0, requests: 0, promise: null, resolve: null, timer: null });
+      records.set(img, { img, url, state: "idle", visible: false, pinned: false,
+        attempts: 0, requests: 0, promise: null, resolve: null, timer: null });
       observer.observe(img);
     }
 

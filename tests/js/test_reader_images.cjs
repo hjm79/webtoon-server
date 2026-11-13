@@ -36,6 +36,7 @@ function fixture(options = {}) {
   }
   return { loader, image, observed, loaded, failed, timers,
     visible: (...imgs) => observerCallback(imgs.map((target) => ({ target, isIntersecting: true }))),
+    hidden: (...imgs) => observerCallback(imgs.map((target) => ({ target, isIntersecting: false }))),
     tick() { const callback = timers.shift(); callback?.(); },
     disconnected: () => disconnected,
   };
@@ -66,6 +67,67 @@ test("the restore target takes precedence over queued neighboring pages", () => 
   imgs[0].succeed();
   assert.equal(imgs[5].requests.length, 1);
   assert.equal(imgs[3].requests.length, 0);
+});
+
+test("newly visible pages bypass observer-only requests that have left the viewport", () => {
+  const f = fixture(); const imgs = Array.from({ length: 9 }, (_, i) => f.image(i));
+  f.visible(...imgs.slice(0, 8));
+  f.hidden(...imgs.slice(0, 8));
+  f.visible(imgs[8]);
+  assert.ok(imgs.slice(3, 8).every((img) => img.dataset.imageState === "idle"));
+  assert.ok(imgs.slice(0, 3).every((img) => img.dataset.imageState === "loading"));
+  assert.ok(imgs.slice(0, 3).every((img) => img.removed.length === 0));
+  imgs[0].succeed();
+  assert.equal(imgs[8].requests.length, 1);
+  assert.ok(imgs.slice(3, 8).every((img) => img.requests.length === 0));
+  f.visible(imgs[4]);
+  imgs[1].succeed();
+  assert.equal(imgs[4].requests.length, 1);
+});
+
+test("explicitly ensured queued pages stay pinned after observer demand leaves", async () => {
+  const f = fixture({ concurrency: 1 }); const a = f.image(0); const target = f.image(1);
+  f.visible(a, target);
+  const pending = f.loader.ensure(target, { priority: true });
+  f.hidden(a, target);
+  a.succeed();
+  assert.equal(target.requests.length, 1);
+  target.succeed();
+  assert.equal(await pending, true);
+});
+
+test("an observer-only retry waits offscreen and resumes with the existing retry budget", () => {
+  const f = fixture(); const img = f.image(0);
+  f.visible(img); img.fail(); f.hidden(img); f.tick();
+  assert.equal(img.requests.length, 1);
+  assert.equal(img.dataset.imageState, "idle");
+  f.visible(img);
+  assert.equal(img.requests.length, 2);
+  assert.match(img.requests[1], /retry=1$/);
+  img.fail(); f.tick(); img.fail();
+  assert.equal(img.requests.length, 3);
+  assert.equal(img.dataset.imageState, "failed");
+});
+
+test("an explicit ensure during an offscreen retry retains a settling promise", async () => {
+  const f = fixture(); const img = f.image(0);
+  f.visible(img); img.fail(); f.hidden(img);
+  const pending = f.loader.ensure(img);
+  f.tick();
+  assert.equal(img.requests.length, 2);
+  img.succeed();
+  assert.equal(await pending, true);
+});
+
+test("destroy settles pinned queued and retry-waiting requests", async () => {
+  const f = fixture({ concurrency: 1 }); const a = f.image(0); const b = f.image(1); const c = f.image(2);
+  const first = f.loader.ensure(a); a.fail();
+  const second = f.loader.ensure(b); const third = f.loader.ensure(c);
+  f.hidden(a, b, c); f.loader.destroy();
+  assert.deepEqual(await Promise.all([first, second, third]), [false, false, false]);
+  f.tick();
+  assert.equal(a.requests.length, 1);
+  assert.equal(c.requests.length, 0);
 });
 
 test("duplicate visibility notifications share the same image load", async () => {

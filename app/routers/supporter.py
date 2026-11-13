@@ -1,10 +1,12 @@
 """Read-only library summaries for a separately authenticated dashboard."""
 
+import asyncio
 import ipaddress
 import math
 import os
 import re
 import secrets
+import zipfile
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
@@ -94,6 +96,11 @@ def _shelf_items(public: str) -> list[dict]:
         metadata = db.get_progress_metadata(sid) or {}
         last_read, last_read_timestamp = _last_read(metadata.get("updated_at"))
         read_ids = db.get_read_chapter_ids(sid)
+        if not read_ids and progress:
+            index = services.resolve_read_index(chapters, progress)
+            if index >= 0:
+                end = index + (progress["page_index"] >= db.PAGE_FINISHED_SENTINEL)
+                read_ids = {chapter["id"] for chapter in chapters[:end]}
         unread = sum(chapter["id"] not in read_ids for chapter in chapters)
         latest_timestamp = _timestamp(series.get("latest_mtime"))
         reading = services.reading_chapter(chapters, progress)
@@ -103,7 +110,7 @@ def _shelf_items(public: str) -> list[dict]:
             "id": sid,
             "title": series["title"],
             "platform": series["platform"],
-            "coverUrl": public + covers.cover_url(series),
+            "coverUrl": public + f"/api/supporter/covers/{sid}?v={covers.cover_version(series)}",
             "href": public + "/reader.html?" + urlencode({"series": sid}),
             "lastReadAt": last_read,
             "pageIndex": page_index,
@@ -149,3 +156,22 @@ def supporter_health(response: Response):
         "baseUrl": public,
         "checks": {"tokenAccepted": True, "publicUrlConfigured": True},
     }
+
+
+@router.get("/api/supporter/covers/{series_id}")
+async def supporter_cover(series_id: str):
+    series = catalog.get_series(series_id) if _ID.fullmatch(series_id) else None
+    if not series or series.get("excluded"):
+        raise HTTPException(404, "no cover", headers=_NO_STORE)
+    try:
+        result = await asyncio.wait_for(
+            services.ensure_cover_cached(series), timeout=services.SERIES_SCAN_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "cover generation timed out", headers=_NO_STORE) from None
+    except (OSError, zipfile.BadZipFile):
+        raise HTTPException(404, "no cover", headers=_NO_STORE) from None
+    if result is None:
+        raise HTTPException(404, "no cover", headers=_NO_STORE)
+    data, media_type = result
+    return Response(content=data, media_type=media_type, headers=_NO_STORE)

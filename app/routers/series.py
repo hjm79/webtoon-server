@@ -193,12 +193,20 @@ class ProgressIn(BaseModel):
     chapter_id: str
     page_index: int = 0
     page_offset: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False, strict=True)
+    completed: bool | None = Field(default=None, strict=True)
 
     @field_validator("page_offset", mode="before")
     @classmethod
     def finite_offset(cls, value):
         if isinstance(value, float) and not math.isfinite(value):
             raise HTTPException(422, "page_offset must be a finite number between 0 and 1")
+        return value
+
+    @field_validator("completed", mode="before")
+    @classmethod
+    def explicit_completed(cls, value):
+        if not isinstance(value, bool):
+            raise HTTPException(422, "completed must be a boolean when provided")
         return value
 
 
@@ -214,21 +222,28 @@ async def save_progress(series_id: str, body: ProgressIn, request: Request):
     idx = next((i for i, ch in enumerate(chapters) if ch["id"] == body.chapter_id), None)
     if idx is None:
         raise HTTPException(404, "chapter not found in series")
+
+    is_last_chapter = idx == len(chapters) - 1
+    legacy_completion = body.completed is None and "page_offset" not in body.model_fields_set
+    completed = False
+    if body.completed is True or (is_last_chapter and legacy_completion):
+        if not is_last_chapter:
+            raise HTTPException(422, "completed is only valid at the end of the last chapter")
+        page_count = len(await services.run_platform_io(series["platform"], scan.list_zip_image_names, chapters[idx]["path"]))
+        if body.completed is True and (page_count == 0 or body.page_index != page_count - 1):
+            raise HTTPException(422, "completed requires the last page of the last chapter")
+        completed = page_count > 0 and body.page_index >= page_count - 1
+
     # 스크롤로 여기까지 왔다는 건 이 앞 회차는 다 지나왔다는 뜻이니 명시적으로 읽음 기록
     # (지금 보고 있는 회차 자체는 "읽는 중"이지 "읽음"이 아니므로 제외)
     access_control.mark_chapters_read(profile, series_id, [ch["id"] for ch in chapters[:idx]])
 
-    is_last_chapter = idx == len(chapters) - 1
-    if is_last_chapter:
-        # 마지막 화는 무한스크롤로 "다음 화에 진입"하는 신호가 절대 발생하지 않아서,
-        # 그것만 보고 있으면 아무리 끝까지 읽어도 영원히 "읽는 중"에 머무르게 된다.
-        # 그래서 마지막 화에 한해서는, 실제로 마지막 페이지까지 도달했으면 그 자체를
-        # 완독으로 인정한다. (run_platform_io 이유는 continue_reading과 동일)
-        page_count = len(await services.run_platform_io(series["platform"], scan.list_zip_image_names, chapters[idx]["path"]))
-        if page_count > 0 and body.page_index >= page_count - 1:
-            access_control.mark_chapters_read(profile, series_id, [chapters[idx]["id"]])
-            access_control.set_progress(profile, series_id, body.chapter_id, idx, db.PAGE_FINISHED_SENTINEL)
-            return {"ok": True}
+    # 정밀 위치 저장은 마지막 이미지 내부에서도 이어진다. 완료 신호가 없던 구형
+    # 클라이언트만 기존 page_index 기반 완료 규칙을 유지한다.
+    if completed:
+        access_control.mark_chapters_read(profile, series_id, [chapters[idx]["id"]])
+        access_control.set_progress(profile, series_id, body.chapter_id, idx, db.PAGE_FINISHED_SENTINEL)
+        return {"ok": True}
 
     access_control.set_progress(
         profile, series_id, body.chapter_id, idx, max(body.page_index, 0), page_offset=body.page_offset
